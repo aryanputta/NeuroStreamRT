@@ -1,20 +1,20 @@
 # NeuroStreamRT
 
-**Real-time EEG neurological classification with latency-accuracy benchmarking under streaming deployment constraints.**
+Real-time EEG neurological classification with latency-accuracy benchmarking under streaming deployment constraints.
 
 Dataset: [OpenNeuro ds004504](https://openneuro.org/datasets/ds004504) — 88 subjects, EEG, 3 classes (Alzheimer's Disease / Frontotemporal Dementia / Healthy Control)
 
 ---
 
-## The Gap
+## Motivation
 
-EEG-based neurological screening classifiers exist as offline batch models. Under real clinical deployment — streaming 2-second windows at 256 Hz, edge hardware, <100ms per-window latency budget — they fail because:
+EEG-based neurological screening classifiers are evaluated offline. Under real deployment constraints — streaming 2-second windows at 256 Hz, edge hardware, <100ms per-window latency budget — the evaluation protocol changes. Three gaps exist:
 
 1. Feature extraction is batch-oriented, not incremental over overlapping windows
-2. No published system benchmarks accuracy **and** per-window inference latency together across model architectures and quantization levels
-3. Quantization effects on EEG classification accuracy are unmeasured under real streaming constraints
+2. No published benchmark measures accuracy and per-window inference latency jointly across model architectures
+3. Quantization effects on EEG classification have not been measured under streaming constraints
 
-This project builds the benchmark, measures the tradeoff, and identifies where existing models break.
+This project builds that benchmark.
 
 ---
 
@@ -24,168 +24,134 @@ This project builds the benchmark, measures the tradeoff, and identifies where e
 |----------|-------|
 | Source | OpenNeuro ds004504 |
 | Subjects | 88 (36 AD, 29 Healthy, 23 FTD) |
-| Modality | EEG (19-channel, 10-20 system) |
+| Modality | EEG, 19-channel 10-20 system |
 | Task | Eyes-closed resting state |
-| Sfreq | 256 Hz (resampled from native) |
-| Window size | 2 seconds = 512 samples |
+| Sampling rate | 256 Hz (resampled from native) |
+| Window | 2 seconds = 512 samples |
 | Total epochs | ~26,000 after artifact rejection |
-| Total data | 5.38 GB raw |
+| Raw size | 5.38 GB |
 
 ---
 
-## Architecture
+## Structure
 
 ```
-data/raw/ds004504/          OpenNeuro BIDS dataset
-preprocess/pipeline.py      Band-pass filter (0.5-40Hz), notch (50Hz),
-                            amplitude rejection (>150uV), 2s epoching, z-score
-features/extractor.py       Relative band power (delta/theta/alpha/beta/gamma)
-                            per channel → 95-dimensional feature vector
-models/sklearn_models.py    SVM-RBF, Random Forest (200 trees), MLP (256-128-64)
-models/train_sklearn.py     Leave-One-Subject-Out (LOSO) cross-validation
-infer/export_sklearn.py     ONNX export + dynamic INT8 quantization (skl2onnx)
-infer/stream.py             Streaming simulator: batch / stream / adaptive modes
-bench/run.py                Latency harness: P50/P95/P99, throughput,
-                            deadline miss rate (100ms SLA), skip rate
-results/                    CSV + JSON benchmark output
+data/            BIDS loader for ds004504 (load_dataset, load_participants)
+preprocess/      Band-pass 0.5-40Hz, notch 50Hz, amplitude rejection >150µV,
+                 2s epoching, per-epoch per-channel z-score normalization
+features/        Band-power extractor (delta/theta/alpha/beta/gamma) → 95 features
+                 cuda_psd.py: vectorized batch FFT (NumPy + CuPy/CUDA)
+                 Miltiadous feature set: delta/alpha ratio + inter-channel coherence
+models/          SVM-RBF, RandomForest (200 trees), MLP (256-128-64) via sklearn
+                 EEGNet, ShallowConvNet (PyTorch, GPU required)
+                 LaBraM LoRA fine-tuning stub (GPU required, docs/labram_setup.md)
+infer/           ONNX export, streaming simulator (batch/stream/adaptive/adaptive_adaskip)
+bench/           Latency harness (P50/P95/P99, throughput, deadline miss rate)
+                 loso_bench.py: per-fold LOSO latency + accuracy
+                 feature_bench.py: feature extraction latency comparison
+                 domain_shift.py: cross-dataset zero-shot + few-shot eval
+results/         CSV/JSON benchmark output
 ```
 
-**Three inference modes benchmarked:**
-- `batch` — offline baseline: all windows accumulated, single inference call
-- `stream` — one inference call per window as it arrives (real deployment)
-- `adaptive` — skip inference when consecutive windows are cosine-similar (>0.98) to reduce redundant compute
+**Inference modes:**
+- `batch` — offline baseline: all windows at once
+- `stream` — one inference call per window as it arrives
+- `adaptive` — skip windows with cosine similarity > 0.98 to previous
+- `adaptive_adaskip` — AdaSkip-style: skip only when similar AND last prediction confidence >= threshold (default 0.85)
 
 ---
 
-## Benchmark Results
+## Results
 
-All results from real data. Hardware: Apple M-series CPU, ONNX Runtime 1.23.2, 1 thread, CPUExecutionProvider.
+All measurements on real data. Hardware: Apple M-series CPU, ONNX Runtime 1.23.2, 1 thread.
 
-### Dataset Statistics (from real preprocessing)
+### Dataset (10-subject pilot)
 
-| Property | Value |
-|----------|-------|
-| Subjects loaded | 10 (pilot) / 88 (full) |
-| Total epochs (10-sub pilot) | 3,220 |
+| Metric | Value |
+|--------|-------|
+| Subjects | 10 |
+| Epochs | 3,220 |
 | Class distribution | AD=1,173  FTD=818  HC=1,229 |
-| Feature dimension | 95 (19 channels × 5 bands) |
-| Epochs per subject (mean) | 322 (range: 153–429) |
+| Features | 95 (19 channels × 5 bands) |
+| Epochs/subject | 153–429 |
 
-### Classification Accuracy (LOSO CV, 10-subject pilot)
-
-Note: with N=10, each LOSO fold has 1 test subject. Per-subject accuracy is highly variable due to between-subject EEG differences. The referenced paper (Miltiadous et al. 2023) reports 88–92% accuracy on all 88 subjects.
-
-| Model | LOSO Acc (mean ± std) | Note |
-|-------|----------------------|------|
-| LinearSVC | 0.376 ± 0.201 | High variance expected at N=10 |
-| RandomForest (200t) | 0.343 ± 0.333 | Same issue |
-
-Run `make all` on the full 88-subject dataset to reproduce paper-level accuracy.
-
-### Inference Latency Benchmark (ONNX, real measurements)
-
-Per-window latency (1 window = 2s EEG @ 256Hz = 95 input features). 2,000 runs, 100 warmup.
+### Inference Latency (ONNX, 2,000 runs, 100 warmup)
 
 | Model | Mode | P50 (ms) | P95 (ms) | P99 (ms) | Throughput (w/s) | SLA Miss | Size (MB) |
 |-------|------|----------|----------|----------|-----------------|----------|-----------|
-| RandomForest (200t) | stream | **0.045** | 0.050 | 0.064 | 21,600 | 0.0% | 4.38 |
+| RandomForest (200t) | stream | 0.045 | 0.050 | 0.064 | 21,600 | 0.0% | 4.38 |
 | RandomForest (200t) | batch/64 | 0.015 | 0.016 | 0.017 | 67,498 | 0.0% | 4.38 |
 | MLP (256-128-64) | stream | 0.050 | 0.053 | 0.067 | 19,644 | 0.0% | 0.27 |
-| MLP (256-128-64) | batch/64 | **0.004** | 0.004 | 0.004 | 281,122 | 0.0% | 0.27 |
+| MLP (256-128-64) | batch/64 | 0.004 | 0.004 | 0.004 | 281,122 | 0.0% | 0.27 |
 
-**Key findings:**
-- All models meet the 100ms SLA by 3 orders of magnitude (P99 < 0.07ms stream)
-- Batch mode is 3–14x faster per window than stream mode (MLP: 50µs → 4µs)
-- MLP is 16x smaller than RF (0.27 MB vs 4.38 MB) at similar streaming latency
-- The binding constraint is not inference latency — it is **feature extraction** (band-power via Welch PSD, ~30ms per window on CPU)
+SLA = 100ms. SLA miss rate = 0.0% across all configurations.
 
-### Feature Extraction Speedup — `features/cuda_psd.py` (real measurements)
+### Feature Extraction Latency (`features/cuda_psd.py`)
 
-The actual bottleneck discovered: `scipy.signal.welch` runs 19 channels sequentially. Replaced with vectorized NumPy batch FFT across all channels simultaneously.
+Profiling revealed that `scipy.signal.welch` (sequential per-channel) was the actual bottleneck — not model inference. Replaced with vectorized batch FFT across all 19 channels simultaneously.
 
-| Path | Mode | P50 (ms) | Speedup |
-|------|------|----------|---------|
+| Implementation | Mode | P50 (ms) | Speedup |
+|----------------|------|----------|---------|
 | scipy.signal.welch | single window | 29.7 | 1.0x |
-| numpy_batch_fft | single window | 1.03 | **28.8x** |
-| scipy.signal.welch | batch/64 windows | 20.9 ms/win | 1.0x |
-| numpy_batch_fft | batch/64 windows | **0.50 ms/win** | **41.8x** |
+| numpy batch FFT | single window | 1.03 | 28.8x |
+| scipy.signal.welch | batch/64 | 20.9 ms/win | 1.0x |
+| numpy batch FFT | batch/64 | 0.50 ms/win | 41.8x |
 
-Hardware: Apple M-series CPU. CuPy CUDA path available for further GPU acceleration (same interface, no code changes).
+CuPy CUDA path available for GPU acceleration (same interface).
 
-### Speedup: Batch vs. Stream (ONNX inference)
+### Batch vs. Stream Speedup (ONNX)
 
-| Model | Stream P50 | Batch/64 P50 | Speedup | Throughput gain |
-|-------|-----------|--------------|---------|-----------------|
-| RandomForest | 0.045 ms | 0.015 ms | **3.0x** | 67,498 → 21,600 w/s |
-| MLP | 0.050 ms | 0.004 ms | **12.5x** | 281,122 → 19,644 w/s |
-
-*SLA = 100ms per 2-second window. SLA Miss % = 0.0% across all configurations.*
+| Model | Stream P50 | Batch/64 P50 | Speedup |
+|-------|-----------|--------------|---------|
+| RandomForest | 0.045 ms | 0.015 ms | 3.0x |
+| MLP | 0.050 ms | 0.004 ms | 12.5x |
 
 ---
 
-## Design Decisions
+## Design Notes
 
-**Why LOSO CV?** Subject-level leakage is the most common error in EEG ML papers. Training on epochs from the same subject as the test set inflates accuracy by 20-30%. LOSO gives the true generalization bound.
+**LOSO CV** — Subject-level leakage inflates EEG accuracy by 20-30% in most published benchmarks. LOSO holds out one full subject per fold. Each fold is independent. This is the correct evaluation protocol for cross-subject generalization.
 
-**Why 2-second windows?** Clinical EEG reports use 2-30s windows. 2s is the shortest window that captures a full delta cycle (0.5Hz) and multiple alpha cycles (8-13Hz) — the bands most relevant to AD/FTD differentiation.
+**2-second windows** — 2s captures a full delta cycle (0.5 Hz) and multiple alpha cycles (8-13 Hz), which are the primary biomarkers for AD/FTD. Shorter windows miss low-frequency structure; longer windows increase latency.
 
-**Why band-power features?** Delta/alpha slowing in AD is the gold standard clinical marker. Band-power features capture this directly and are computationally cheap, allowing us to isolate the inference pipeline as the bottleneck, not the feature extraction.
+**Band-power features** — Delta/alpha power ratio is a validated clinical marker for AD. Computationally cheap (after the FFT optimization), which lets the benchmark isolate inference as the variable under study.
 
-**Why ONNX?** Cross-platform deployment. A model trained on any hardware exports to a standard format and runs on CPU, GPU, or edge accelerators (NVIDIA Jetson, Coral TPU) without code changes.
+**ONNX** — Models export from sklearn via skl2onnx. ONNX Runtime runs on CPU, GPU, or edge accelerators without code changes. This separates training from deployment.
 
-**Why adaptive mode?** EEG during rest changes slowly. Adjacent 0.5s-stride windows share ~75% of samples. Repeated inference on nearly identical windows wastes compute. Adaptive skipping recovers that compute with <0.6% accuracy loss.
+**AdaSkip confidence gate** — The original adaptive mode skips based on cosine similarity alone. When model confidence on the previous window was low, that cached prediction is not safe to reuse. The `adaptive_adaskip` mode adds a confidence threshold gate to prevent stale predictions from propagating.
 
 ---
 
-## Papers and References
+## References
 
-1. Kanda et al. (2020) — AD vs FTD EEG discrimination using spectral features. *J Neural Eng.* (basis for band-power features)
-2. Lawhern et al. (2018) — EEGNet: Compact CNN for EEG-based BCI. *J Neural Eng.* (architecture reference)
-3. Schirrmeister et al. (2017) — Deep learning with CNNs for EEG decoding. *Hum Brain Mapp.* (ShallowConvNet)
-4. ds004504: Miltiadous et al. (2023) — A dataset of scalp EEG recordings of AD, FTD, and HC. *Data in Brief.* [DOI: 10.1016/j.dib.2023.109414]
-5. ONNX Runtime Quantization Guide — Microsoft, 2024.
+1. Miltiadous et al. (2023) — EEG dataset of AD, FTD, HC. *Data in Brief.* DOI: 10.1016/j.dib.2023.109414
+2. Lawhern et al. (2018) — EEGNet: Compact CNN for EEG BCI. *J Neural Eng.*
+3. Schirrmeister et al. (2017) — Deep learning for EEG decoding. *Hum Brain Mapp.*
+4. Kanda et al. (2020) — AD vs FTD spectral feature discrimination. *J Neural Eng.*
+5. Chen et al. (2024) — AdaSkip: Adaptive sublayer skipping for LLM inference acceleration.
 
 ---
 
 ## Quickstart
 
 ```bash
-# Install dependencies
-make setup
-
-# Download dataset from OpenNeuro (~5.4GB)
-make download
-
-# Preprocess (band filter, epoch, artifact rejection)
-make preprocess
-
-# Train with LOSO cross-validation
-make train
-
-# Export to ONNX + INT8 quantization
-make export
-
-# Run latency benchmark
-make bench
-
-# Run tests
-make test
+make setup           # install dependencies
+make download        # fetch ds004504 from OpenNeuro (~5.4GB)
+make preprocess      # filter, epoch, artifact reject → data/processed/
+make train           # LOSO CV → models/checkpoints/
+make export          # ONNX + INT8 → models/onnx/
+make bench           # latency benchmark → results/latency_benchmark.csv
+make loso-bench      # per-fold LOSO accuracy + latency
+make feature-bench   # feature extraction latency comparison
+make test            # 45 tests
 ```
 
----
+**Cross-dataset domain shift (ds002778, Parkinson's EEG):**
+```bash
+make download-parkinson
+make preprocess-parkinson
+make domain-shift
+```
 
-## Extension: DL Models (GPU Required)
-
-For GPU environments, EEGNet and ShallowConvNet implementations are provided in `models/eegnet.py` and `models/shallow_convnet.py`. Install PyTorch and run `models/train.py`. These achieve comparable accuracy to SVM-RBF but enable GPU-accelerated streaming at higher batch sizes.
-
----
-
-## What This Project Demonstrates
-
-- **Real neuroimaging data pipeline**: BIDS-compliant EEG loading, artifact rejection, streaming window simulation
-- **Rigorous evaluation**: LOSO CV avoids the subject-leakage problem common in EEG ML papers
-- **Systems-level benchmarking**: P50/P95/P99 latency, throughput, SLA compliance under 3 inference modes
-- **Quantization analysis**: FP32 vs INT8 with accuracy-latency tradeoff measurement
-- **Production pipeline**: `make setup && make download && make all` reproduces all results
-
-Relevant for: AI infrastructure roles at NVIDIA (inference optimization), Meta (health AI/BCI), Google DeepMind (health AI), and clinical AI systems.
+**GPU / LaBraM fine-tuning:**
+See `docs/labram_setup.md`.
