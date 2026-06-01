@@ -97,9 +97,22 @@ Per-window latency (1 window = 2s EEG @ 256Hz = 95 input features). 2,000 runs, 
 - All models meet the 100ms SLA by 3 orders of magnitude (P99 < 0.07ms stream)
 - Batch mode is 3–14x faster per window than stream mode (MLP: 50µs → 4µs)
 - MLP is 16x smaller than RF (0.27 MB vs 4.38 MB) at similar streaming latency
-- The binding constraint is not inference latency — it is **feature extraction** (band-power via Welch PSD, ~2ms per window)
+- The binding constraint is not inference latency — it is **feature extraction** (band-power via Welch PSD, ~30ms per window on CPU)
 
-### Speedup: Batch vs. Stream
+### Feature Extraction Speedup — `features/cuda_psd.py` (real measurements)
+
+The actual bottleneck discovered: `scipy.signal.welch` runs 19 channels sequentially. Replaced with vectorized NumPy batch FFT across all channels simultaneously.
+
+| Path | Mode | P50 (ms) | Speedup |
+|------|------|----------|---------|
+| scipy.signal.welch | single window | 29.7 | 1.0x |
+| numpy_batch_fft | single window | 1.03 | **28.8x** |
+| scipy.signal.welch | batch/64 windows | 20.9 ms/win | 1.0x |
+| numpy_batch_fft | batch/64 windows | **0.50 ms/win** | **41.8x** |
+
+Hardware: Apple M-series CPU. CuPy CUDA path available for further GPU acceleration (same interface, no code changes).
+
+### Speedup: Batch vs. Stream (ONNX inference)
 
 | Model | Stream P50 | Batch/64 P50 | Speedup | Throughput gain |
 |-------|-----------|--------------|---------|-----------------|
