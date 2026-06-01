@@ -6,10 +6,12 @@ A sliding window of 2s (512 samples) advances by stride_samples each tick.
 At each tick the inference pipeline runs and must complete within deadline_ms.
 
 Modes:
-  batch     — accumulate all windows, run inference once (offline baseline)
-  stream    — process each window independently as it arrives
-  adaptive  — skip inference on windows similar to previous (cosine similarity threshold)
-              simulates early-exit / caching to reduce redundant compute
+  batch           — accumulate all windows, run inference once (offline baseline)
+  stream          — process each window independently as it arrives
+  adaptive        — skip inference on windows similar to previous (cosine similarity threshold)
+  adaptive_adaskip — AdaSkip-style: skip only when similar AND last confidence >= threshold
+                    Inspired by: AdaSkip (adaptive sublayer skipping for LLM inference)
+                    Applied here: skip window inference when EEG is stable AND model is certain
 
 This module is used by bench/run.py to drive latency measurements.
 """
@@ -31,6 +33,10 @@ class StreamConfig:
     stride_sec: float = 0.5
     deadline_ms: float = 100.0
     adaptive_threshold: float = 0.98
+    # AdaSkip confidence gate: skip only when last prediction confidence >= this value.
+    # Prevents caching stale predictions when the model is uncertain.
+    confidence_threshold: float = 0.85
+    use_confidence_gate: bool = True
 
 
 @dataclass
@@ -116,9 +122,11 @@ class StreamingInferenceEngine:
         if mode == "batch":
             return self._run_batch(windows)
         elif mode == "stream":
-            return self._run_per_window(windows, adaptive=False)
+            return self._run_per_window(windows, adaptive=False, adaskip=False)
         elif mode == "adaptive":
-            return self._run_per_window(windows, adaptive=True)
+            return self._run_per_window(windows, adaptive=True, adaskip=False)
+        elif mode == "adaptive_adaskip":
+            return self._run_per_window(windows, adaptive=True, adaskip=True)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
@@ -148,16 +156,31 @@ class StreamingInferenceEngine:
         return results
 
     def _run_per_window(
-        self, windows: list[np.ndarray], adaptive: bool
+        self, windows: list[np.ndarray], adaptive: bool, adaskip: bool = False
     ) -> list[WindowResult]:
-        """Process each window independently."""
+        """
+        Process each window independently.
+
+        adaptive=True: skip windows with cosine sim >= adaptive_threshold (heuristic)
+        adaskip=True:  additionally gate skips by confidence — windows where the last
+                       prediction had low confidence are NEVER skipped, even if similar.
+                       Inspired by AdaSkip (adaptive sublayer skipping for LLM inference).
+        """
         results = []
         last_pred, last_conf = 0, 0.0
 
         for i, window in enumerate(windows):
             features = self._extract(window)
 
-            if adaptive and self._is_similar(features):
+            # AdaSkip gate: skip only if similar AND (confidence gate passes)
+            confidence_ok = (
+                not adaskip
+                or not self.config.use_confidence_gate
+                or last_conf >= self.config.confidence_threshold
+            )
+            should_skip = adaptive and self._is_similar(features) and confidence_ok
+
+            if should_skip:
                 results.append(
                     WindowResult(
                         window_idx=i,

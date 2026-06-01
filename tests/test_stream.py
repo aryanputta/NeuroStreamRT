@@ -131,3 +131,48 @@ class TestStreamingInferenceEngine:
         eeg = self._make_eeg(4.0)
         with pytest.raises(ValueError, match="Unknown mode"):
             self.engine.run_stream(eeg, mode="invalid_mode")
+
+    def test_adaptive_adaskip_mode_runs(self):
+        """adaptive_adaskip mode should produce results without error."""
+        eeg = self._make_eeg(8.0)
+        results = self.engine.run_stream(eeg, mode="adaptive_adaskip")
+        assert len(results) > 0
+
+    def test_confidence_gate_prevents_skip_on_low_confidence(self):
+        """Window must NOT be skipped when last confidence is below threshold."""
+        config = StreamConfig(
+            sfreq=256, window_sec=2.0, stride_sec=0.5,
+            adaptive_threshold=0.0,      # always "similar" (0.0 = always trigger)
+            confidence_threshold=0.99,   # threshold very high
+            use_confidence_gate=True,
+        )
+        engine = StreamingInferenceEngine(self.session, config, feature_type="raw")
+        # Constant EEG — cosine sim will be 1.0 (similar)
+        eeg = np.ones((19, 2560), dtype=np.float32)
+        results = engine.run_stream(eeg, mode="adaptive_adaskip")
+        # First window always runs inference (no prior), subsequent windows:
+        # similarity triggers but confidence gate holds them if conf < 0.99
+        # Since mock session returns random logits, softmax confidence rarely > 0.99
+        # so very few (or zero) windows should be skipped
+        skipped = [r for r in results if r.skipped]
+        total = len(results)
+        skip_rate = len(skipped) / total if total > 0 else 0.0
+        # With threshold=0.99 and random logits, expect very low skip rate (<20%)
+        assert skip_rate < 0.20, f"Expected low skip rate with high threshold, got {skip_rate:.2f}"
+
+    def test_confidence_gate_disabled_skips_like_plain_adaptive(self):
+        """With gate disabled, adaptive_adaskip should skip identically to adaptive."""
+        config = StreamConfig(
+            sfreq=256, window_sec=2.0, stride_sec=0.5,
+            adaptive_threshold=0.0,  # always "similar"
+            use_confidence_gate=False,
+        )
+        engine_adaskip = StreamingInferenceEngine(self.session, config, feature_type="raw")
+        engine_adaptive = StreamingInferenceEngine(self.session, config, feature_type="raw")
+        eeg = np.ones((19, 2048), dtype=np.float32)
+        res_adaskip = engine_adaskip.run_stream(eeg, mode="adaptive_adaskip")
+        res_adaptive = engine_adaptive.run_stream(eeg, mode="adaptive")
+        skips_adaskip = sum(1 for r in res_adaskip if r.skipped)
+        skips_adaptive = sum(1 for r in res_adaptive if r.skipped)
+        # Both should skip the same windows (gate disabled means same logic)
+        assert skips_adaskip == skips_adaptive

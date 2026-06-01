@@ -143,26 +143,40 @@ if __name__ == "__main__":
         stride_sec=0.5,
         deadline_ms=DEADLINE_MS,
         adaptive_threshold=0.98,
+        confidence_threshold=0.85,
+        use_confidence_gate=True,
     )
 
     model_feature_map = {
         "eegnet": "raw",
         "shallowconv": "raw",
         "mlp": "band_power",
+        "mlp_sklearn": "band_power",
+        "svm_rbf": "band_power",
+        "random_forest": "band_power",
+        "randomforest": "band_power",
+        "linearsvc": "band_power",
     }
 
     combos = []
     for onnx_file in sorted(Path(args.model_dir).glob("*.onnx")):
-        stem = onnx_file.stem  # e.g. eegnet_fp32
-        parts = stem.split("_")
-        model_name = parts[0]
-        quant = parts[1] if len(parts) > 1 else "fp32"
-        feature_type = model_feature_map.get(model_name, "raw")
+        stem = onnx_file.stem  # e.g. random_forest_fp32
+        # parse model name: everything before the last _fp32/_int8 suffix
+        if stem.endswith("_fp32"):
+            model_name = stem[:-5]
+            quant = "fp32"
+        elif stem.endswith("_int8"):
+            model_name = stem[:-5]
+            quant = "int8"
+        else:
+            model_name = stem
+            quant = "fp32"
+        feature_type = model_feature_map.get(model_name, "band_power")
         combos.append((str(onnx_file), model_name, quant, feature_type))
 
     results = []
     for onnx_path, model_name, quant, feat_type in combos:
-        for mode in ["batch", "stream", "adaptive"]:
+        for mode in ["batch", "stream", "adaptive", "adaptive_adaskip"]:
             print(f"\nBenchmarking {model_name} / {quant} / {mode}...")
             try:
                 res = run_benchmark(

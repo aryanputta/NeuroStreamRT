@@ -15,7 +15,7 @@ Band definitions (Hz):
 """
 
 import numpy as np
-from scipy.signal import welch
+from scipy.signal import coherence, welch
 
 BANDS = {
     "delta": (0.5, 4.0),
@@ -72,6 +72,65 @@ def extract_band_power(
     return np.stack([band_power_epoch(ep, sfreq) for ep in epochs], axis=0)
 
 
+def extract_miltiadous_features(
+    epochs: np.ndarray, sfreq: float = 256.0
+) -> np.ndarray:
+    """
+    Replicate Miltiadous et al. (2023) feature set for ds004504.
+
+    Features per epoch:
+      - Delta/alpha power ratio per channel (19 values) — key AD biomarker
+      - Theta/alpha power ratio per channel (19 values)
+      - Absolute alpha band power per channel (19 values)
+      - Mean coherence (alpha band) between all channel pairs (171 pairs for 19ch)
+        — captures inter-channel synchrony, reduced in AD
+
+    Total: 19 + 19 + 19 + 171 = 228 features per epoch.
+
+    Reference: Miltiadous et al. (2023), Data in Brief. DOI: 10.1016/j.dib.2023.109414
+    """
+    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    n_ep, n_ch, n_samples = epochs.shape
+    n_per_seg = min(n_samples, int(sfreq * 1.0))
+
+    all_features = []
+    for ep in epochs:
+        delta_pwr = np.zeros(n_ch, dtype=np.float32)
+        theta_pwr = np.zeros(n_ch, dtype=np.float32)
+        alpha_pwr = np.zeros(n_ch, dtype=np.float32)
+
+        for ch in range(n_ch):
+            freqs, psd = welch(ep[ch], fs=sfreq, nperseg=n_per_seg)
+            def _band(lo, hi):
+                mask = (freqs >= lo) & (freqs < hi)
+                return float(_trapz(psd[mask], freqs[mask]))
+            delta_pwr[ch] = _band(0.5, 4.0)
+            theta_pwr[ch] = _band(4.0, 8.0)
+            alpha_pwr[ch] = _band(8.0, 13.0)
+
+        alpha_safe = alpha_pwr + 1e-10
+        delta_alpha_ratio = (delta_pwr / alpha_safe).astype(np.float32)
+        theta_alpha_ratio = (theta_pwr / alpha_safe).astype(np.float32)
+
+        # Mean alpha-band coherence between all channel pairs
+        coh_values = []
+        for i in range(n_ch):
+            for j in range(i + 1, n_ch):
+                f_coh, cxy = coherence(ep[i], ep[j], fs=sfreq, nperseg=n_per_seg)
+                alpha_mask = (f_coh >= 8.0) & (f_coh < 13.0)
+                coh_values.append(float(cxy[alpha_mask].mean()) if alpha_mask.any() else 0.0)
+
+        ep_feats = np.concatenate([
+            delta_alpha_ratio,
+            theta_alpha_ratio,
+            alpha_pwr,
+            np.array(coh_values, dtype=np.float32),
+        ])
+        all_features.append(ep_feats)
+
+    return np.stack(all_features, axis=0).astype(np.float32)
+
+
 def extract_features(
     records: list[dict], feature_type: str = "band_power"
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -96,6 +155,8 @@ def extract_features(
 
         if feature_type == "band_power":
             feats = extract_band_power(epochs, sfreq)
+        elif feature_type == "miltiadous":
+            feats = extract_miltiadous_features(epochs, sfreq)
         elif feature_type == "raw":
             feats = epochs  # (N, C, T) — for DL
         else:
