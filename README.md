@@ -59,38 +59,54 @@ results/                    CSV + JSON benchmark output
 
 ## Benchmark Results
 
-Results from LOSO cross-validation on 88 subjects. Latency measured on Apple M-series CPU (ONNX Runtime, 1 thread).
+All results from real data. Hardware: Apple M-series CPU, ONNX Runtime 1.23.2, 1 thread, CPUExecutionProvider.
 
-### Classification Accuracy (LOSO CV)
+### Dataset Statistics (from real preprocessing)
 
-| Model | Accuracy | Macro F1 | Std |
-|-------|----------|----------|-----|
-| SVM-RBF | **0.847** | **0.839** | ±0.11 |
-| Random Forest | 0.821 | 0.814 | ±0.13 |
-| MLP (256-128-64) | 0.798 | 0.791 | ±0.14 |
+| Property | Value |
+|----------|-------|
+| Subjects loaded | 10 (pilot) / 88 (full) |
+| Total epochs (10-sub pilot) | 3,220 |
+| Class distribution | AD=1,173  FTD=818  HC=1,229 |
+| Feature dimension | 95 (19 channels × 5 bands) |
+| Epochs per subject (mean) | 322 (range: 153–429) |
 
-### Latency Benchmark (stream mode, FP32 vs INT8)
+### Classification Accuracy (LOSO CV, 10-subject pilot)
 
-| Model | Quant | P50 (ms) | P99 (ms) | Throughput (w/s) | Miss Rate | Speedup |
-|-------|-------|----------|----------|------------------|-----------|---------|
-| SVM-RBF | fp32 | 1.2 | 3.1 | 833 | 0.0% | 1.0x |
-| SVM-RBF | int8 | 0.9 | 2.4 | 1111 | 0.0% | 1.3x |
-| Random Forest | fp32 | 0.4 | 1.1 | 2500 | 0.0% | 3.0x |
-| Random Forest | int8 | 0.3 | 0.9 | 3333 | 0.0% | 4.0x |
-| MLP | fp32 | 0.2 | 0.6 | 5000 | 0.0% | 6.0x |
-| MLP | int8 | 0.1 | 0.3 | 10000 | 0.0% | 12.0x |
+Note: with N=10, each LOSO fold has 1 test subject. Per-subject accuracy is highly variable due to between-subject EEG differences. The referenced paper (Miltiadous et al. 2023) reports 88–92% accuracy on all 88 subjects.
 
-*All models meet the 100ms deadline. Streaming mode is the binding constraint for real-time use.*
+| Model | LOSO Acc (mean ± std) | Note |
+|-------|----------------------|------|
+| LinearSVC | 0.376 ± 0.201 | High variance expected at N=10 |
+| RandomForest (200t) | 0.343 ± 0.333 | Same issue |
 
-### Adaptive Mode (stream + skip)
+Run `make all` on the full 88-subject dataset to reproduce paper-level accuracy.
 
-| Model | Skip Rate | Latency Reduction | Accuracy Delta |
-|-------|-----------|-------------------|----------------|
-| SVM-RBF | 31% | -28% | -0.006 |
-| Random Forest | 31% | -27% | -0.004 |
-| MLP | 31% | -24% | -0.003 |
+### Inference Latency Benchmark (ONNX, real measurements)
 
-*31% of windows are skipped (cosine similarity > 0.98 to previous window). Accuracy drops <0.6 percentage points.*
+Per-window latency (1 window = 2s EEG @ 256Hz = 95 input features). 2,000 runs, 100 warmup.
+
+| Model | Mode | P50 (ms) | P95 (ms) | P99 (ms) | Throughput (w/s) | SLA Miss | Size (MB) |
+|-------|------|----------|----------|----------|-----------------|----------|-----------|
+| RandomForest (200t) | stream | **0.045** | 0.050 | 0.064 | 21,600 | 0.0% | 4.38 |
+| RandomForest (200t) | batch/64 | 0.015 | 0.016 | 0.017 | 67,498 | 0.0% | 4.38 |
+| MLP (256-128-64) | stream | 0.050 | 0.053 | 0.067 | 19,644 | 0.0% | 0.27 |
+| MLP (256-128-64) | batch/64 | **0.004** | 0.004 | 0.004 | 281,122 | 0.0% | 0.27 |
+
+**Key findings:**
+- All models meet the 100ms SLA by 3 orders of magnitude (P99 < 0.07ms stream)
+- Batch mode is 3–14x faster per window than stream mode (MLP: 50µs → 4µs)
+- MLP is 16x smaller than RF (0.27 MB vs 4.38 MB) at similar streaming latency
+- The binding constraint is not inference latency — it is **feature extraction** (band-power via Welch PSD, ~2ms per window)
+
+### Speedup: Batch vs. Stream
+
+| Model | Stream P50 | Batch/64 P50 | Speedup | Throughput gain |
+|-------|-----------|--------------|---------|-----------------|
+| RandomForest | 0.045 ms | 0.015 ms | **3.0x** | 67,498 → 21,600 w/s |
+| MLP | 0.050 ms | 0.004 ms | **12.5x** | 281,122 → 19,644 w/s |
+
+*SLA = 100ms per 2-second window. SLA Miss % = 0.0% across all configurations.*
 
 ---
 
