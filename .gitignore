@@ -12,3 +12,6 @@ results/*.json
 *.pkl
 *.onnx
 .DS_Store
+docs/paper/*.pdf
+.Rhistory
+.vscode/
