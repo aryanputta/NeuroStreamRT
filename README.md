@@ -6,6 +6,10 @@ Dataset: [OpenNeuro ds004504](https://openneuro.org/datasets/ds004504) — 88 su
 
 ---
 
+Project overview: https://aryanputta.com/projects#p5
+
+
+
 ## Motivation
 
 EEG-based neurological screening classifiers are evaluated offline. Under real deployment constraints — streaming 2-second windows at 256 Hz, edge hardware, <100ms per-window latency budget — the evaluation protocol changes. Three gaps exist:
