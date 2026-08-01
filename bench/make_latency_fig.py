@@ -6,15 +6,13 @@ under the deadline line. Reproducible from results/latency_benchmark.csv.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path.home() / "paper-kit"))
-import paperstyle  # noqa: E402
+import matplotlib
 
-paperstyle.use()
-import matplotlib.pyplot as plt  # noqa: E402
-import pandas as pd  # noqa: E402
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
 
 DEADLINE_MS = 100.0  # bench/run.py: 2.0 s window, 100 ms per-window deadline
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +24,7 @@ LABELS = {
     ("MLP_256_128_64", "stream"): "MLP\nstream",
     ("MLP_256_128_64", "batch_64"): "MLP\nbatch64",
 }
-BAR = paperstyle.PALETTE["blue"]  # same method-family blue across figures
+BAR = "#2b6cb0"  # same method-family blue across figures
 TAIL = "#aebfd0"  # p99 whisker shade
 
 
