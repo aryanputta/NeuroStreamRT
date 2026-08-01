@@ -126,6 +126,16 @@ CuPy CUDA path available for GPU acceleration (same interface).
 
 ---
 
+## Figures
+
+The latency figure is reproducible from `results/latency_benchmark.csv`:
+
+```bash
+python3 bench/make_latency_fig.py
+```
+
+It writes `docs/paper/figs/latency.pdf` and `docs/paper/figs/latency.png`. Install the pinned requirements first. The script uses a non-interactive Matplotlib backend and does not read credentials.
+
 ## References
 
 1. Miltiadous et al. (2023) — EEG dataset of AD, FTD, HC. *Data in Brief.* DOI: 10.1016/j.dib.2023.109414
